@@ -1,0 +1,24 @@
+# 编译产物（绝对不能进仓库）
+build/
+cmake-build-debug/
+cmake-build-release/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.iml
+.cache/
+compile_commands.json
+CMakeUserPresets.json
+
+# 系统垃圾文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# CubeMX 临时文件
+*.ioc.bak
+~$*
+
+# 培训资料包原文件，不属于本工程
+materials/
