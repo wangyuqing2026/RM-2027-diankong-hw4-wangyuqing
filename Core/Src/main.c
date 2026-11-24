@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include "OLED.h"
 #include "Servo.h"
+#include "Key.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -81,6 +82,32 @@ int _write(int fd, char *ptr, int len)
   HAL_UART_Transmit(&huart1, (uint8_t *)ptr, (uint16_t)len, 100);
   return len;
 }
+
+/* 一次刷新：舵机 + OLED 三行 + 串口。原来 while 里那一大坨，搬到这里 */
+static void Servo_Show(float angle)
+{
+  uint16_t ccr = AngleToCCR(angle);
+
+  Servo_SetAngle(angle);           /* 1. 让舵机动起来 */
+
+  /* 2. OLED 三行：Target / CCR / Pulse */
+  OLED_ShowString(1, 1, "Target:");
+  OLED_ShowNum(1, 9, (uint32_t)angle, 3);
+  OLED_ShowString(1, 12, "deg");
+
+  OLED_ShowString(2, 1, "CCR   :");
+  OLED_ShowNum(2, 9, ccr, 4);
+
+  OLED_ShowString(3, 1, "Pulse :");
+  OLED_ShowNum(3, 9, ccr / 1000, 1);
+  OLED_ShowString(3, 10, ".");
+  OLED_ShowNum(3, 11, ccr % 1000, 3);
+  OLED_ShowString(3, 14, "ms");
+
+  /* 3. 串口打印同样内容（不用 %f，省十几 KB） */
+  printf("Target=%3d  CCR=%4d  Pulse=%d.%03dms\r\n",
+         (int)angle, ccr, ccr / 1000, ccr % 1000);
+}
 /* USER CODE END 0 */
 
 /**
@@ -127,7 +154,12 @@ int main(void)
   OLED_Init();      /* 内部会初始化 PB8(SCL)/PB9(SDA) 两根线 */
   OLED_Clear();
 
-  uint8_t idx = 0;  /* 当前在走序列里的第几个角度 */
+  float    target    = SERVO_SEQ[0];  /* 当前目标角度 */
+  uint8_t  idx       = 0;             /* 序列走到第几个 */
+  uint32_t last_tick = HAL_GetTick(); /* 上一次刷新（或按键）的时刻 */
+  uint8_t  auto_left = 6;             /* 上电先自动演示一轮，走完就全交给按键 */
+
+  Servo_Show(target);                 /* 先把第一帧画出来 */
 
   /* USER CODE END 2 */
 
@@ -139,34 +171,32 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    float    target = SERVO_SEQ[idx];
-    uint16_t ccr    = AngleToCCR(target);
 
-    Servo_SetAngle(target);          /* 1. 让舵机动起来 */
+    int8_t key = Key_Scan();                 /* 1. 先看按键，最多卡 20ms */
 
-    /* 2. OLED 三行：Target / CCR / Pulse */
-    OLED_ShowString(1, 1, "Target:");
-    OLED_ShowNum(1, 9, (uint32_t)target, 3);
-    OLED_ShowString(1, 12, "deg");
+    if (key != 0)                            /* 2. 有按键：改角度，限幅 0~180 */
+    {
+      auto_left = 0;                         /* 按键一介入，自动序列立刻永久退出 */
+      target += (float)key * 15.0f;
 
-    OLED_ShowString(2, 1, "CCR   :");
-    OLED_ShowNum(2, 9, ccr, 4);
+      if (target < 0.0f)   { target = 0.0f;   }
+      if (target > 180.0f) { target = 180.0f; }
 
-    OLED_ShowString(3, 1, "Pulse :");
-    OLED_ShowNum(3, 9, ccr / 1000, 1);
-    OLED_ShowString(3, 10, ".");
-    OLED_ShowNum(3, 11, ccr % 1000, 3);
-    OLED_ShowString(3, 14, "ms");
+      last_tick = HAL_GetTick();
+    }
+    else if (auto_left > 0 && HAL_GetTick() - last_tick >= 1000)  /* 3. 没按键：走演示序列 */
+    {
+      last_tick = HAL_GetTick();
+      target = SERVO_SEQ[idx];
+      idx = (idx + 1) % 5;
+      auto_left--;                           /* 走掉的格数，走满 6 格就停手 */
+    }
+    else
+    {
+      continue;                              /* 4. 都不是：这一圈直接跳过 */
+    }
 
-    /* 3. 串口打印同样内容。
-     *    这里没有用 %f —— 浮点版 printf 会让程序体积涨十几 KB，
-     *    拆成整数部分和小数部分打，又小又稳。 */
-    printf("Target=%3d  CCR=%4d  Pulse=%d.%03dms\r\n",
-           (int)target, (int)ccr, ccr / 1000, ccr % 1000);
-
-    HAL_Delay(1000);                 /* 4. 停 1 秒 */
-
-    idx = (idx + 1) % 5;             /* 5. 下一个角度，到 180 度后回到 0 度 */
+    Servo_Show(target);                      /* 5. 角度变了才刷新 OLED + 串口 */
   }
   /* USER CODE END 3 */
 }
@@ -309,6 +339,7 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
@@ -316,6 +347,12 @@ static void MX_GPIO_Init(void)
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pins : KEY_UP_Pin KEY_DOWN_Pin */
+  GPIO_InitStruct.Pin = KEY_UP_Pin|KEY_DOWN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
